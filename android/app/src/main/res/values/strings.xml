@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">TabLink Display</string>
+    <string name="status_waiting">Bağlantı bekleniyor</string>
+    <string name="status_hint">Tableti USB kablosuyla bilgisayara bağlayın ve bilgisayarda TabLink Host\'u çalıştırın.</string>
+</resources>
