@@ -58,6 +58,10 @@ masaüstünün uzantısı görünmelidir. 60 Hz denemek için:
 | 7 | Kabloyu çıkarıp takın | Birkaç saniyede yeniden bağlanır |
 | 8 | Windows'ta yenileme hızını veya yönü değiştirin | Görüntü kısa bir kesintiyle geri gelir |
 | 9 | Tablette başka uygulamaya geçip geri dönün | Görüntü geri gelir |
+| 10 | Fareyi tablet ekranına götürün | İmleç görünür ve akıcı hareket eder |
+| 11 | Bilgisayarı kilitleyip (Win+L) açın | Yayın kendiliğinden devam eder |
+| 12 | Konsolda Ctrl+C | Program kapanır, ikinci monitör Windows'tan kalkar |
+| 13 | Host'u yönetici olmadan çalıştırıp kapatın, sonra yönetici olarak açın | Tablet yine bağlanır |
 
 ## Sorun olursa bana gönderin
 
@@ -69,6 +73,9 @@ masaüstünün uzantısı görünmelidir. 60 Hz denemek için:
 
 - "USB ping" yalnızca bağlantının gidiş-dönüş süresidir; ekrandan ekrana
   toplam gecikme değildir. Gerçek ölçüm aracı Aşama 4'te gelecek.
+- Windows'ta ekran yönünü "Portrait" yaparsanız görüntü tablette yan durur;
+  tableti fiziksel olarak çevirmeniz gerekir.
+- 256 pikselden büyük özel imleçler kırpılır.
 - DRM korumalı içerik (Netflix vb.) siyah görünür.
 - Driver, laptopunuzun HDR'ı açıkken farklı davranabilir; Aşama 1'de HDR'ı
   kapalı tutun.

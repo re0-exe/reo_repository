@@ -151,7 +151,10 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
                 runOnUiThread { applyRefreshRate(cfg.fps) }
                 thread(name = "tablink-control", isDaemon = true) { controlLoop(controlSocket, out) }
 
-                val videoSocket = runBlocking { server.await(Channel.VIDEO) }
+                // The host opens video right after sending Config. If it does
+                // not, it is gone; go back to listening for a new session.
+                val videoSocket = runBlocking { server.awaitOrNull(Channel.VIDEO, VIDEO_CHANNEL_TIMEOUT_MS) }
+                    ?: throw IOException("host did not open the video channel")
                 video = videoSocket
                 videoLoop(videoSocket)
             } catch (e: IOException) {
@@ -265,5 +268,6 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private companion object {
         const val TAG = "TabLinkStream"
         const val SOCKET_BUFFER_BYTES = 256 * 1024
+        const val VIDEO_CHANNEL_TIMEOUT_MS = 5000L
     }
 }

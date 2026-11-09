@@ -4,8 +4,10 @@
 
 pub mod adb;
 pub mod capture;
+pub mod cursor;
 pub mod display;
 pub mod encode;
 pub mod gate;
 pub mod session;
+pub mod shutdown;
 pub mod transport;

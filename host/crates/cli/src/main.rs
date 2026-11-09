@@ -28,6 +28,9 @@ fn main() {
         }
     };
 
+    tablink_core::shutdown::install_handler();
+    // A run that was killed may have left its monitor attached.
+    tablink_core::display::VirtualDisplay::disable_leftover();
     let adb = Adb::locate();
     println!("TabLink Host — tablet bekleniyor (çıkmak için Ctrl+C).");
     // Printed once per distinct state so the console is not flooded.
@@ -39,7 +42,7 @@ fn main() {
         }
     };
 
-    loop {
+    while !tablink_core::shutdown::requested() {
         let devices = match adb.devices() {
             Ok(d) => d,
             Err(e) => {
@@ -76,9 +79,18 @@ fn main() {
         notice(format!("Tablet bulundu ({serial}), bağlanılıyor..."));
         match run_session(&adb, &serial, fps) {
             SessionEnd::Disconnected => {
-                notice("Bağlantı kesildi; yeniden deneniyor.".into());
+                notice(
+                    "Bağlantı kesildi; yeniden deneniyor. (Sürekli tekrarlıyorsa tablette TabLink Display \
+                     uygulamasının kurulu olduğunu doğrulayın.)"
+                        .into(),
+                );
                 std::thread::sleep(Duration::from_secs(1));
             }
+            SessionEnd::Interrupted(reason) => {
+                notice(format!("Yayın kesildi ({reason}); yeniden başlatılıyor."));
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            SessionEnd::Shutdown => break,
             SessionEnd::Fatal(e) => {
                 eprintln!("{}", match e {
                     SessionError::DriverMissing =>
@@ -95,6 +107,7 @@ fn main() {
             }
         }
     }
+    println!("Kapatılıyor.");
 }
 
 #[cfg(not(windows))]

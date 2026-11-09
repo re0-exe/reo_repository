@@ -6,7 +6,7 @@
 //! submitted after a `METransformNeedInput` event, and output is collected
 //! after `METransformHaveOutput`.
 
-use super::{split_parameter_sets, EncodeError, EncodedFrame, EncoderConfig, VideoEncoder};
+use super::{contains_irap, split_parameter_sets, EncodeError, EncodedFrame, EncoderConfig, VideoEncoder};
 use crate::capture::CapturedFrame;
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
@@ -21,10 +21,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHR
 
 /// NV12 textures cycled as encoder input. The encoder may still be reading a
 /// texture when the next frame arrives, so they are never reused back to back.
-const INPUT_RING: usize = 4;
-/// How long `encode` waits for the frame it just submitted to come back
-/// before returning without it (it is then delivered by a later call).
-const OUTPUT_WAIT: Duration = Duration::from_millis(50);
+const INPUT_RING: usize = 8;
 /// How long the encoder is given to ask for input before it is considered stuck.
 const INPUT_WAIT: Duration = Duration::from_millis(500);
 /// Effectively "never" at 120 fps; keyframes are sent on request instead.
@@ -59,6 +56,9 @@ pub struct MfHevcEncoder {
 
     cfg: EncoderConfig,
     need_input: u32,
+    /// Frames submitted whose output has not been collected yet. Each one
+    /// still owns a ring texture.
+    in_encoder: usize,
     ready: VecDeque<EncodedFrame>,
     parameter_sets: Vec<u8>,
 }
@@ -191,6 +191,7 @@ impl MfHevcEncoder {
                 ring_next: 0,
                 cfg: cfg.clone(),
                 need_input: 0,
+                in_encoder: 0,
                 ready: VecDeque::new(),
                 parameter_sets: Vec::new(),
             })
@@ -273,7 +274,10 @@ impl MfHevcEncoder {
         let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
         let _ = buffer.Unlock();
 
-        let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+        self.in_encoder = self.in_encoder.saturating_sub(1);
+        // Not every vendor sets the clean-point attribute; the bitstream is
+        // the authority on whether a decoder can start here.
+        let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0 || contains_irap(&data);
         let pts_us = (sample.GetSampleTime().unwrap_or(0) / 10).max(0) as u64;
         if keyframe {
             let (ps, _) = split_parameter_sets(&data);
@@ -316,7 +320,8 @@ impl VideoEncoder for MfHevcEncoder {
             )));
         }
         unsafe {
-            if !self.pump_until(INPUT_WAIT, |s| s.need_input > 0)? {
+            // Never hand the encoder a ring texture it may still be reading.
+            if !self.pump_until(INPUT_WAIT, |s| s.need_input > 0 && s.in_encoder < INPUT_RING - 1)? {
                 return Err(EncodeError::Mf("encoder stopped requesting input".into()));
             }
             let texture = self.convert(frame)?;
@@ -328,8 +333,13 @@ impl VideoEncoder for MfHevcEncoder {
 
             self.transform.ProcessInput(0, &sample, 0).map_err(mf("ProcessInput"))?;
             self.need_input -= 1;
+            self.in_encoder += 1;
 
-            self.pump_until(OUTPUT_WAIT, |s| !s.ready.is_empty())?;
+            // Wait at most half a frame interval for this frame to come back.
+            // An encoder that answers one frame late then costs no throughput:
+            // its output is picked up by the next call or by `poll`.
+            let wait = Duration::from_micros(500_000 / self.cfg.fps.max(1) as u64);
+            self.pump_until(wait, |s| !s.ready.is_empty())?;
         }
         Ok(self.ready.pop_front())
     }
@@ -352,7 +362,14 @@ impl Drop for MfHevcEncoder {
     fn drop(&mut self) {
         unsafe {
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            let _ = self.transform.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+            // An asynchronous transform keeps its event queue and the hardware
+            // encoder session until it is shut down explicitly. A new encoder
+            // is created on every reconnect, so leaking them would add up.
+            if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+                let _ = shutdown.Shutdown();
+            }
         }
     }
 }

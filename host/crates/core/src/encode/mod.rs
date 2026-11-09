@@ -80,6 +80,13 @@ pub fn split_parameter_sets(annexb: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (ps, rest)
 }
 
+/// Whether the stream holds an IRAP picture (NAL types 16-21), i.e. a frame a
+/// decoder can start from. Used alongside the encoder's own keyframe flag,
+/// which not every vendor sets.
+pub fn contains_irap(annexb: &[u8]) -> bool {
+    nal_units(annexb).iter().any(|nal| nal.first().is_some_and(|b| (16..=21).contains(&((b >> 1) & 0x3F))))
+}
+
 /// NAL unit payloads (without start codes) of an Annex-B stream.
 fn nal_units(data: &[u8]) -> Vec<&[u8]> {
     // Positions just past each `00 00 01`.
@@ -141,6 +148,15 @@ mod tests {
         let (ps, rest) = split_parameter_sets(&stream);
         assert_eq!(ps, [0, 0, 0, 1, SPS, 1, 0xBB, 0, 0, 0, 1, PPS, 1, 0xCC]);
         assert_eq!(rest, [0, 0, 0, 1, IDR, 1, 0xDD]);
+    }
+
+    #[test]
+    fn irap_is_detected_from_nal_types() {
+        assert!(contains_irap(&[0, 0, 0, 1, VPS, 1, 0, 0, 1, IDR, 1, 0xDD]));
+        assert!(contains_irap(&[0, 0, 1, 21 << 1, 1, 0xDD])); // CRA
+        assert!(!contains_irap(&[0, 0, 0, 1, 1 << 1, 1, 0xDD])); // trailing picture
+        assert!(!contains_irap(&[0, 0, 0, 1, VPS, 1, 0xAA]));
+        assert!(!contains_irap(&[]));
     }
 
     #[test]

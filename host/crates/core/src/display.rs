@@ -209,6 +209,14 @@ mod win {
             std::path::Path::new(DRIVER_CONFIG_PATH).is_file() && driver_instance().is_some()
         }
 
+        /// Removes a monitor left behind by a run that was killed before it
+        /// could clean up.
+        pub fn disable_leftover() {
+            if let Some(id) = driver_instance() {
+                let _ = pnputil(&["/disable-device", &id]);
+            }
+        }
+
         /// Points the driver at `mode` and brings its monitor up. Requires an
         /// elevated process: toggling a device is an administrative action.
         pub fn enable(mode: &DisplayMode) -> Result<VirtualDisplay, DisplayError> {

@@ -69,6 +69,11 @@ pub enum SessionError {
 pub enum SessionEnd {
     /// The link dropped (cable pulled, app closed). Try again.
     Disconnected,
+    /// Capture or encoding failed mid-stream (GPU reset, lock screen). The
+    /// session can be started again.
+    Interrupted(String),
+    /// The user asked the program to exit.
+    Shutdown,
     Fatal(SessionError),
 }
 
@@ -117,10 +122,19 @@ mod win {
         Ok((control, hello))
     }
 
-    fn open_duplicator(display: &VirtualDisplay) -> Result<DesktopDuplicator, String> {
+    /// Opens capture on the virtual monitor, waiting for it to become
+    /// available. `keep_trying` lets the caller wait out situations with no
+    /// fixed duration, such as the lock screen, where duplication is denied.
+    fn open_duplicator(display: &VirtualDisplay, keep_trying: impl Fn() -> bool) -> Result<DesktopDuplicator, String> {
         let mut last = String::new();
-        for _ in 0..REOPEN_ATTEMPTS {
-            match display.output().map_err(|e| e.to_string()).and_then(|o| DesktopDuplicator::new(&o).map_err(|e| e.to_string())) {
+        let mut attempt = 0;
+        while attempt < REOPEN_ATTEMPTS || keep_trying() {
+            attempt += 1;
+            let opened = display
+                .output()
+                .map_err(|e| e.to_string())
+                .and_then(|o| DesktopDuplicator::new(&o).map_err(|e| e.to_string()));
+            match opened {
                 Ok(d) => return Ok(d),
                 Err(e) => last = e,
             }
@@ -178,14 +192,16 @@ mod win {
             return SessionEnd::Disconnected;
         }
 
+        // The tablet waits for the video channel right after `Config`; open
+        // it before the display is brought up, which can take seconds.
+        let video = match transport.open(Channel::Video) {
+            Ok(v) => v,
+            Err(_) => return SessionEnd::Disconnected,
+        };
         let display = match VirtualDisplay::enable(&display_mode(&hello)) {
             Ok(d) => d,
             Err(DisplayError::DriverMissing) => return SessionEnd::Fatal(SessionError::DriverMissing),
             Err(e) => return SessionEnd::Fatal(SessionError::Display(e.to_string())),
-        };
-        let video = match transport.open(Channel::Video) {
-            Ok(v) => v,
-            Err(_) => return SessionEnd::Disconnected,
         };
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -235,7 +251,8 @@ mod win {
             });
         }
 
-        let mut duplicator = match open_duplicator(&display) {
+        let running = || !stop.load(Ordering::Relaxed) && !crate::shutdown::requested();
+        let mut duplicator = match open_duplicator(&display, || false) {
             Ok(d) => d,
             Err(e) => return SessionEnd::Fatal(SessionError::Other(e)),
         };
@@ -250,6 +267,9 @@ mod win {
         println!("Yayın başladı.");
 
         loop {
+            if crate::shutdown::requested() {
+                return SessionEnd::Shutdown;
+            }
             if stop.load(Ordering::Relaxed) {
                 return SessionEnd::Disconnected;
             }
@@ -274,19 +294,26 @@ mod win {
 
             let event = match duplicator.next(CAPTURE_TIMEOUT_MS) {
                 Ok(e) => e,
-                Err(e) => return SessionEnd::Fatal(SessionError::Other(e.to_string())),
+                Err(e) => return SessionEnd::Interrupted(e.to_string()),
             };
+            // A keyframe request must be answered even when the screen is
+            // still: the tablet shows nothing until it gets one.
+            let resend = pending || keyframe_wanted.load(Ordering::Relaxed);
             let frame: Option<CapturedFrame> = match event {
                 CaptureEvent::Frame(f) => Some(f),
-                CaptureEvent::Timeout if pending => duplicator.last_frame(),
+                CaptureEvent::Timeout if resend => duplicator.last_frame(),
                 CaptureEvent::Timeout => None,
                 CaptureEvent::ModeChanged => {
                     // Resolution, orientation or refresh rate changed in
                     // Windows: rebuild capture, and the encoder with it.
+                    // While the lock screen or a UAC prompt is up, duplication
+                    // is refused; keep waiting for as long as the link lives.
                     encoder = None;
-                    duplicator = match open_duplicator(&display) {
+                    duplicator = match open_duplicator(&display, running) {
                         Ok(d) => d,
-                        Err(e) => return SessionEnd::Fatal(SessionError::Other(e)),
+                        Err(_) if crate::shutdown::requested() => return SessionEnd::Shutdown,
+                        Err(_) if stop.load(Ordering::Relaxed) => return SessionEnd::Disconnected,
+                        Err(e) => return SessionEnd::Interrupted(e),
                     };
                     continue;
                 }
@@ -309,21 +336,21 @@ mod win {
                         Err(EncodeError::NoHardwareEncoder) => {
                             return SessionEnd::Fatal(SessionError::NoHardwareEncoder)
                         }
-                        Err(e) => return SessionEnd::Fatal(SessionError::Other(e.to_string())),
+                        Err(e) => return SessionEnd::Interrupted(e.to_string()),
                     };
                     sent_parameter_sets.clear();
                 }
                 let enc = encoder.as_mut().expect("encoder was just created");
-                if keyframe_wanted.swap(false, Ordering::Relaxed) {
-                    enc.request_keyframe();
-                }
                 if gate.try_acquire() {
+                    if keyframe_wanted.swap(false, Ordering::Relaxed) {
+                        enc.request_keyframe();
+                    }
                     pending = false;
                     match enc.encode(&frame) {
                         Ok(Some(f)) => output = Some(f),
                         // Still inside the encoder; collected by `poll` below.
                         Ok(None) => gate.release(),
-                        Err(e) => return SessionEnd::Fatal(SessionError::Other(e.to_string())),
+                        Err(e) => return SessionEnd::Interrupted(e.to_string()),
                     }
                 } else {
                     pending = true;
@@ -336,7 +363,7 @@ mod win {
                     match enc.poll() {
                         Ok(Some(f)) => output = Some(f),
                         Ok(None) => gate.release(),
-                        Err(e) => return SessionEnd::Fatal(SessionError::Other(e.to_string())),
+                        Err(e) => return SessionEnd::Interrupted(e.to_string()),
                     }
                 }
             }

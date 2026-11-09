@@ -37,17 +37,25 @@ pub use win::{CaptureError, CaptureEvent, CapturedFrame, DesktopDuplicator};
 #[cfg(windows)]
 mod win {
     use super::*;
+    use crate::cursor::{self, CursorKind, CursorShape};
     use windows::core::Interface;
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
-        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-        D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
     };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
     use windows::Win32::Graphics::Dxgi::{
         IDXGIAdapter, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
+        DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     };
+
+    /// Edge of the scratch surface used to blend the pointer; larger cursors
+    /// are cut off at this size.
+    const CURSOR_SCRATCH: u32 = 256;
 
     #[derive(Debug)]
     pub struct CaptureError(pub String);
@@ -63,8 +71,8 @@ mod win {
         CaptureError(format!("{what}: {e}"))
     }
 
-    /// A desktop image in BGRA. The texture is the duplicator's own copy of
-    /// the desktop and is overwritten by the next captured frame.
+    /// A desktop image in BGRA with the mouse pointer drawn in. The texture is
+    /// the duplicator's own and is overwritten by the next captured frame.
     pub struct CapturedFrame {
         pub texture: ID3D11Texture2D,
         pub pts_us: u64,
@@ -87,6 +95,10 @@ mod win {
         /// changes, so a frame that was skipped under backpressure would
         /// otherwise be lost for as long as the screen stays still.
         last: Option<(ID3D11Texture2D, u32, u32)>,
+        scratch: Option<ID3D11Texture2D>,
+        pointer_shape: Option<CursorShape>,
+        pointer_visible: bool,
+        pointer_pos: (i32, i32),
     }
 
     impl DesktopDuplicator {
@@ -117,7 +129,17 @@ mod win {
                 let _ = mt.SetMultithreadProtected(true);
 
                 let duplication = output.DuplicateOutput(&device).map_err(|e| err("DuplicateOutput", e))?;
-                Ok(DesktopDuplicator { device, context, duplication, holding_frame: false, last: None })
+                Ok(DesktopDuplicator {
+                    device,
+                    context,
+                    duplication,
+                    holding_frame: false,
+                    last: None,
+                    scratch: None,
+                    pointer_shape: None,
+                    pointer_visible: false,
+                    pointer_pos: (0, 0),
+                })
             }
         }
 
@@ -125,8 +147,8 @@ mod win {
             &self.device
         }
 
-        /// Waits up to `timeout_ms` for the desktop to change. Pointer-only
-        /// updates are reported as `Timeout`: the image itself is unchanged.
+        /// Waits up to `timeout_ms` for the desktop image or the mouse
+        /// pointer to change.
         pub fn next(&mut self, timeout_ms: u32) -> Result<CaptureEvent, CaptureError> {
             unsafe {
                 if self.holding_frame {
@@ -143,9 +165,21 @@ mod win {
                     };
                 }
                 self.holding_frame = true;
-                if info.LastPresentTime == 0 {
+
+                let pointer_moved = info.LastMouseUpdateTime != 0;
+                if pointer_moved {
+                    self.pointer_visible = info.PointerPosition.Visible.as_bool();
+                    self.pointer_pos = (info.PointerPosition.Position.x, info.PointerPosition.Position.y);
+                }
+                if info.PointerShapeBufferSize > 0 {
+                    self.read_pointer_shape(info.PointerShapeBufferSize);
+                }
+                if info.LastPresentTime == 0 && !pointer_moved {
                     return Ok(CaptureEvent::Timeout);
                 }
+
+                // Every acquired frame carries the whole desktop, also when
+                // only the pointer moved, so the copy starts out cursor-free.
                 let resource = resource.ok_or_else(|| CaptureError("frame without a surface".into()))?;
                 let texture: ID3D11Texture2D = resource.cast().map_err(|e| err("frame texture", e))?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -167,8 +201,13 @@ mod win {
                     let copy = copy.ok_or_else(|| CaptureError("no frame copy texture".into()))?;
                     self.last = Some((copy, desc.Width, desc.Height));
                 }
-                if let Some((copy, _, _)) = &self.last {
+                if let Some(copy) = self.last.as_ref().map(|(copy, _, _)| copy.clone()) {
+                    let copy = &copy;
                     self.context.CopyResource(copy, &texture);
+                    if desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM {
+                        // A pointer that cannot be drawn is not worth losing the frame over.
+                        let _ = self.draw_pointer(&texture, copy, desc.Width, desc.Height);
+                    }
                 }
                 Ok(self.last_frame().map_or(CaptureEvent::Timeout, CaptureEvent::Frame))
             }
@@ -178,6 +217,84 @@ mod win {
         pub fn last_frame(&self) -> Option<CapturedFrame> {
             let (texture, width, height) = self.last.as_ref()?;
             Some(CapturedFrame { texture: texture.clone(), pts_us: now_us(), width: *width, height: *height })
+        }
+
+        unsafe fn read_pointer_shape(&mut self, size: u32) {
+            let mut data = vec![0u8; size as usize];
+            let mut required = 0u32;
+            let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+            if self.duplication.GetFramePointerShape(size, data.as_mut_ptr() as *mut _, &mut required, &mut info).is_err() {
+                return;
+            }
+            let Some(kind) = CursorKind::from_dxgi(info.Type) else { return };
+            let height = if kind == CursorKind::Monochrome { info.Height / 2 } else { info.Height };
+            let shape = CursorShape { kind, width: info.Width, height, pitch: info.Pitch, data };
+            if shape.is_valid() {
+                self.pointer_shape = Some(shape);
+            }
+        }
+
+        /// Blends the pointer into `target`. The pixels under the pointer are
+        /// read back from `source` through a small staging texture, blended on
+        /// the CPU and written back; the frame itself never leaves the GPU.
+        unsafe fn draw_pointer(
+            &mut self,
+            source: &ID3D11Texture2D,
+            target: &ID3D11Texture2D,
+            width: u32,
+            height: u32,
+        ) -> Result<(), CaptureError> {
+            if !self.pointer_visible {
+                return Ok(());
+            }
+            let Some(shape) = &self.pointer_shape else { return Ok(()) };
+            let (px, py) = self.pointer_pos;
+            let Some(clip) = cursor::clip(px, py, shape.width, shape.height, width, height, CURSOR_SCRATCH) else {
+                return Ok(());
+            };
+
+            if self.scratch.is_none() {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: CURSOR_SCRATCH,
+                    Height: CURSOR_SCRATCH,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    MiscFlags: 0,
+                };
+                let mut scratch = None;
+                self.device.CreateTexture2D(&desc, None, Some(&mut scratch)).map_err(|e| err("cursor scratch", e))?;
+                self.scratch = scratch;
+            }
+            let Some(scratch) = &self.scratch else { return Ok(()) };
+
+            let region = D3D11_BOX {
+                left: clip.x,
+                top: clip.y,
+                front: 0,
+                right: clip.x + clip.width,
+                bottom: clip.y + clip.height,
+                back: 1,
+            };
+            self.context.CopySubresourceRegion(scratch, 0, 0, 0, 0, source, 0, Some(&region));
+
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            self.context.Map(scratch, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| err("map cursor scratch", e))?;
+            let stride = clip.width as usize * 4;
+            let mut pixels = vec![0u8; stride * clip.height as usize];
+            for row in 0..clip.height as usize {
+                let src = (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
+                std::ptr::copy_nonoverlapping(src, pixels.as_mut_ptr().add(row * stride), stride);
+            }
+            self.context.Unmap(scratch, 0);
+
+            cursor::blend(&mut pixels, stride, clip.width, clip.height, shape, clip.src_x, clip.src_y);
+            self.context.UpdateSubresource(target, 0, Some(&region), pixels.as_ptr() as *const _, stride as u32, 0);
+            Ok(())
         }
     }
 

@@ -9,6 +9,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
@@ -70,6 +71,21 @@ class ChannelServerTest {
         assertEquals(-1, first.getInputStream().read())
         writeMessage(second.getOutputStream(), 0, Message.Ping)
         assertEquals(Message.Ping, readMessage(secondServerSide.getInputStream()).second)
+    }
+
+    @Test
+    fun awaitOrNullGivesUpWhenChannelNeverOpens() {
+        connect(1)
+        await(Channel.CONTROL)
+        assertNull(runBlocking { server.awaitOrNull(Channel.VIDEO, 200) })
+    }
+
+    @Test
+    fun awaitOrNullReturnsChannelThatOpensInTime() {
+        val video = connect(2)
+        writeMessage(video.getOutputStream(), 0, Message.Ping)
+        val serverSide = runBlocking { server.awaitOrNull(Channel.VIDEO, 5000) }
+        assertEquals(Message.Ping, readMessage(serverSide!!.getInputStream()).second)
     }
 
     @Test

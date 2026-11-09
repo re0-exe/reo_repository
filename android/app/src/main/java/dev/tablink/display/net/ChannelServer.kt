@@ -10,6 +10,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import kotlin.concurrent.thread
 import kotlinx.coroutines.channels.Channel as Queue
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Listens on loopback for the host's connections (reached through
@@ -35,6 +36,14 @@ class ChannelServer(private val port: Int = Protocol.PORT) : Closeable {
 
     /** Suspends until the host opens (or re-opens) [ch]. */
     suspend fun await(ch: Channel): Socket = queues.getValue(ch).receive()
+
+    /**
+     * Like [await], but gives up after [timeoutMs] and returns null. Used for
+     * channels that must follow shortly after another one: if the host went
+     * away in between, waiting forever would leave the app deaf to its return.
+     */
+    suspend fun awaitOrNull(ch: Channel, timeoutMs: Long): Socket? =
+        withTimeoutOrNull(timeoutMs) { queues.getValue(ch).receive() }
 
     private fun acceptLoop() {
         while (!server.isClosed) {

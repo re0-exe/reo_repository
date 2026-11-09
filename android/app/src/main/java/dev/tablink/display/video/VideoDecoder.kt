@@ -18,6 +18,7 @@ import java.nio.ByteBuffer
  */
 class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
     private class Frame(val data: ByteArray, val ptsUs: Long, val keyframe: Boolean)
+    private class Setup(val surface: Surface, val width: Int, val height: Int, val fps: Int, val csd: ByteArray)
 
     private val lock = Any()
     private val thread = HandlerThread("tablink-decoder").apply { start() }
@@ -27,20 +28,27 @@ class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
     private val pending = ArrayDeque<Frame>()
     private val freeInputs = ArrayDeque<Int>()
     private var waitingForKeyframe = true
+    /** What the decoder was last configured with, to rebuild it after a fatal error. */
+    private var setup: Setup? = null
 
     fun configure(surface: Surface, width: Int, height: Int, fps: Int, csd: ByteArray): Unit = synchronized(lock) {
+        configureLocked(Setup(surface, width, height, fps, csd))
+    }
+
+    private fun configureLocked(s: Setup) {
         releaseLocked()
-        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, width, height).apply {
-            setByteBuffer("csd-0", ByteBuffer.wrap(csd))
+        setup = s
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_HEVC, s.width, s.height).apply {
+            setByteBuffer("csd-0", ByteBuffer.wrap(s.csd))
             setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             setInteger(MediaFormat.KEY_PRIORITY, 0)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, s.fps)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_BYTES)
         }
         try {
             val created = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC)
             created.setCallback(Callback(created), handler)
-            created.configure(format, surface, null, 0)
+            created.configure(format, s.surface, null, 0)
             created.start()
             codec = created
         } catch (e: Exception) {
@@ -65,14 +73,32 @@ class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
                 true
             } else {
                 pending.addLast(Frame(data, ptsUs, keyframe))
-                drainLocked()
-                false
+                try {
+                    drainLocked()
+                    false
+                } catch (e: IllegalStateException) {
+                    // The codec is in an error state (CodecException is an
+                    // IllegalStateException). Rebuild it and start over.
+                    Log.w(TAG, "queueing input failed; restarting decoder", e)
+                    restartLocked()
+                    true
+                }
             }
         }
         if (askForKeyframe) onNeedKeyframe()
     }
 
-    fun release(): Unit = synchronized(lock) { releaseLocked() }
+    fun release(): Unit = synchronized(lock) {
+        releaseLocked()
+        setup = null
+    }
+
+    /** Rebuilds the decoder from its last configuration, if the surface is still there. */
+    private fun restartLocked() {
+        val s = setup
+        releaseLocked()
+        if (s != null && s.surface.isValid) configureLocked(s)
+    }
 
     /** Releases the decoder and its thread; the instance is unusable afterwards. */
     fun close() {
@@ -145,10 +171,13 @@ class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
             Log.e(TAG, "decoder error", e)
             synchronized(lock) {
                 if (!current()) return
-                // Flushing would need a restart in async mode; dropping queued
-                // input and resyncing on a keyframe is enough for transient errors.
-                pending.clear()
-                waitingForKeyframe = true
+                if (e.isRecoverable || e.isTransient) {
+                    // Dropping queued input and resyncing on a keyframe is enough.
+                    pending.clear()
+                    waitingForKeyframe = true
+                } else {
+                    restartLocked()
+                }
             }
             onNeedKeyframe()
         }
