@@ -1,9 +1,8 @@
 package dev.tablink.display.ui
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,13 +18,14 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.tablink.display.R
-import dev.tablink.display.ui.theme.TabLinkTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent { TabLinkTheme { WaitingScreen() } }
+        // The stream screen owns the connection and shows the waiting state
+        // itself, so opening the app by hand behaves like the host opening it.
+        startActivity(Intent(this, StreamActivity::class.java))
+        finish()
     }
 }
 

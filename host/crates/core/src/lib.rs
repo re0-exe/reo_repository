@@ -7,4 +7,5 @@ pub mod capture;
 pub mod display;
 pub mod encode;
 pub mod gate;
+pub mod session;
 pub mod transport;

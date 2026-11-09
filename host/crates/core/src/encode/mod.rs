@@ -47,6 +47,8 @@ pub trait VideoEncoder {
     /// Submits a frame. Returns an encoded frame when one is ready, which
     /// with a low-latency encoder is normally the frame just submitted.
     fn encode(&mut self, frame: &crate::capture::CapturedFrame) -> Result<Option<EncodedFrame>, EncodeError>;
+    /// Collects a frame the encoder finished after `encode` had returned.
+    fn poll(&mut self) -> Result<Option<EncodedFrame>, EncodeError>;
     fn request_keyframe(&mut self);
 }
 

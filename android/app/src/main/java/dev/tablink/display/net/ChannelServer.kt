@@ -66,8 +66,15 @@ class ChannelServer(private val port: Int = Protocol.PORT) : Closeable {
         queues.getValue(channel).trySend(socket)
     }
 
+    /** Drops the current connection of [ch], waking whoever is reading from it. */
+    fun closeChannel(ch: Channel) {
+        synchronized(current) { current.remove(ch) }?.closeQuietly()
+    }
+
     override fun close() {
         server.closeQuietly()
+        // Wakes anything suspended in [await].
+        queues.values.forEach { it.close() }
         synchronized(current) {
             current.values.forEach { it.closeQuietly() }
             current.clear()
