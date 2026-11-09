@@ -3,5 +3,6 @@
 //! any platform; Windows API calls are confined to `#[cfg(windows)]` code.
 
 pub mod adb;
+pub mod display;
 pub mod gate;
 pub mod transport;
