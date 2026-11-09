@@ -1,0 +1,7 @@
+[
+  {"file":"hello.bin","ptsUs":0,"message":{"type":"Hello","version":1,"width":2800,"height":1752,"refreshHz":[60,120],"caps":3,"dpi":266}},
+  {"file":"config.bin","ptsUs":0,"message":{"type":"Config","width":2800,"height":1752,"fps":120,"codec":0,"hdr":false,"profile":0,"bitrateKbps":80000}},
+  {"file":"video_config.bin","ptsUs":0,"message":{"type":"VideoConfig","data":[0,0,0,1,64]}},
+  {"file":"video_frame_key.bin","ptsUs":1000,"message":{"type":"VideoFrame","keyframe":true,"data":[1,2,3]}},
+  {"file":"ping.bin","ptsUs":0,"message":{"type":"Ping"}}
+]
