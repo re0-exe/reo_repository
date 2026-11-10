@@ -24,16 +24,17 @@ pub struct EncodedFrame {
 
 #[derive(Debug)]
 pub enum EncodeError {
-    /// No hardware HEVC encoder exists for the capture GPU. There is no
-    /// software fallback: it could not meet the latency target.
-    NoHardwareEncoder,
+    /// No hardware HEVC encoder could be started for the capture GPU; the
+    /// text says which GPU and what was tried. There is no software fallback:
+    /// it could not meet the latency target.
+    NoHardwareEncoder(String),
     Mf(String),
 }
 
 impl std::fmt::Display for EncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EncodeError::NoHardwareEncoder => write!(f, "no hardware HEVC encoder available"),
+            EncodeError::NoHardwareEncoder(detail) => write!(f, "no hardware HEVC encoder available: {detail}"),
             EncodeError::Mf(m) => write!(f, "encoder error: {m}"),
         }
     }

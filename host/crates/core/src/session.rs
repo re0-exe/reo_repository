@@ -57,7 +57,7 @@ pub fn choose_config(hello: &Hello, preferred_fps: u16) -> Config {
 #[derive(Debug)]
 pub enum SessionError {
     DriverMissing,
-    NoHardwareEncoder,
+    NoHardwareEncoder(String),
     /// The tablet app speaks another protocol version.
     VersionMismatch,
     /// Toggling the virtual display failed, typically for lack of elevation.
@@ -137,7 +137,10 @@ mod win {
                 .map_err(|e| e.to_string())
                 .and_then(|o| DesktopDuplicator::new(&o).map_err(|e| e.to_string()));
             match opened {
-                Ok(d) => return Ok(d),
+                Ok(d) => {
+                    println!("Yakalama: {}", display.describe());
+                    return Ok(d);
+                }
                 Err(e) => last = e,
             }
             std::thread::sleep(REOPEN_INTERVAL);
@@ -338,8 +341,8 @@ mod win {
                     };
                     encoder = match MfHevcEncoder::new(duplicator.device(), &cfg) {
                         Ok(e) => Some(e),
-                        Err(EncodeError::NoHardwareEncoder) => {
-                            return SessionEnd::Fatal(SessionError::NoHardwareEncoder)
+                        Err(EncodeError::NoHardwareEncoder(detail)) => {
+                            return SessionEnd::Fatal(SessionError::NoHardwareEncoder(detail))
                         }
                         Err(e) => return SessionEnd::Interrupted(e.to_string()),
                     };

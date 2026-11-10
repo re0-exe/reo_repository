@@ -13,11 +13,14 @@ pub enum Classified {
 
 const DXGI_ERROR_ACCESS_LOST: i32 = 0x887A0026u32 as i32;
 const DXGI_ERROR_WAIT_TIMEOUT: i32 = 0x887A0027u32 as i32;
+/// Seen on real hardware when the display topology changes (extend <->
+/// duplicate): the duplication object is no longer usable.
+const DXGI_ERROR_INVALID_CALL: i32 = 0x887A0001u32 as i32;
 
 pub fn classify(hr: i32) -> Classified {
     match hr {
         DXGI_ERROR_WAIT_TIMEOUT => Classified::Timeout,
-        DXGI_ERROR_ACCESS_LOST => Classified::ModeChanged,
+        DXGI_ERROR_ACCESS_LOST | DXGI_ERROR_INVALID_CALL => Classified::ModeChanged,
         _ => Classified::Fatal,
     }
 }
@@ -316,6 +319,11 @@ mod tests {
     #[test]
     fn access_lost_maps_to_mode_changed() {
         assert_eq!(classify(0x887A0026u32 as i32), Classified::ModeChanged);
+    }
+
+    #[test]
+    fn invalid_call_maps_to_mode_changed() {
+        assert_eq!(classify(0x887A0001u32 as i32), Classified::ModeChanged);
     }
 
     #[test]

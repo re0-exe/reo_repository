@@ -95,8 +95,9 @@ fn main() {
                 eprintln!("{}", match e {
                     SessionError::DriverMissing =>
                         "Virtual Display Driver kurulu değil. Kurulum adımları: docs/driver.md".to_string(),
-                    SessionError::NoHardwareEncoder =>
-                        "Bu GPU için donanımsal HEVC encoder bulunamadı. Ekran kartı sürücüsünü güncelleyin.".to_string(),
+                    SessionError::NoHardwareEncoder(detail) => format!(
+                        "Donanımsal HEVC encoder başlatılamadı. Aşağıdaki satırı geliştiriciye iletin:\n  {detail}"
+                    ),
                     SessionError::VersionMismatch =>
                         "Tablet uygulaması ile host sürümü uyuşmuyor. İkisini de aynı derlemeden kurun.".to_string(),
                     SessionError::Display(m) =>

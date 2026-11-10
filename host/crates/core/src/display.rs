@@ -329,7 +329,7 @@ mod win {
             !candidates.is_empty() && candidates.iter().all(|d| !d.attached)
         }
 
-        fn find_output(&self) -> Option<IDXGIOutput1> {
+        fn find(&self) -> Option<(String, String, IDXGIOutput1)> {
             let devices = display_devices();
             let names: Vec<&str> = virtual_candidates(&self.before, &devices)
                 .into_iter()
@@ -339,7 +339,19 @@ mod win {
             if names.is_empty() {
                 return None;
             }
-            dxgi_outputs().into_iter().find(|(_, name, _)| names.contains(&name.as_str())).map(|(_, _, o)| o)
+            dxgi_outputs().into_iter().find(|(_, name, _)| names.contains(&name.as_str()))
+        }
+
+        fn find_output(&self) -> Option<IDXGIOutput1> {
+            self.find().map(|(_, _, output)| output)
+        }
+
+        /// Which output is being captured and on which GPU, for the log.
+        pub fn describe(&self) -> String {
+            match self.find() {
+                Some((adapter, name, _)) => format!("{name} ({adapter})"),
+                None => "sanal monitör bulunamadı".into(),
+            }
         }
 
         /// The DXGI output of the virtual monitor. Looked up on every call

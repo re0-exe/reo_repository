@@ -385,20 +385,30 @@ unsafe fn set_common_video_attributes(ty: &IMFMediaType, cfg: &EncoderConfig) ->
     Ok(())
 }
 
-/// Finds the hardware HEVC encoder that belongs to `device`'s adapter. On a
-/// machine with two GPUs each vendor registers its own encoder, and an encoder
-/// only works with textures from its own adapter.
-unsafe fn find_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform, EncodeError> {
-    let dxgi: IDXGIDevice = device.cast().map_err(mf("IDXGIDevice"))?;
-    let luid = dxgi.GetAdapter().and_then(|a| a.GetDesc()).map_err(mf("adapter"))?.AdapterLuid;
-    let mut luid_bytes = [0u8; 8];
-    luid_bytes[..4].copy_from_slice(&luid.LowPart.to_le_bytes());
-    luid_bytes[4..].copy_from_slice(&luid.HighPart.to_le_bytes());
+fn wide(w: &[u16]) -> String {
+    let len = w.iter().position(|c| *c == 0).unwrap_or(w.len());
+    String::from_utf16_lossy(&w[..len])
+}
 
+unsafe fn friendly_name(activate: &IMFActivate) -> String {
+    let mut name = windows::core::PWSTR::null();
+    let mut len = 0u32;
+    if activate.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name, &mut len).is_err() || name.is_null() {
+        return "?".into();
+    }
+    let text = name.to_string().unwrap_or_else(|_| "?".into());
+    CoTaskMemFree(Some(name.0 as *const _));
+    text
+}
+
+/// Hardware HEVC encoders, optionally only those of one adapter.
+unsafe fn enumerate_encoders(adapter_luid: Option<&[u8; 8]>) -> Result<Vec<IMFActivate>, EncodeError> {
     let mut filter = None;
     MFCreateAttributes(&mut filter, 1).map_err(mf("enum attributes"))?;
     let filter: IMFAttributes = filter.ok_or(EncodeError::Mf("no enum attributes".into()))?;
-    filter.SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid_bytes).map_err(mf("adapter filter"))?;
+    if let Some(luid) = adapter_luid {
+        filter.SetBlob(&MFT_ENUM_ADAPTER_LUID, luid).map_err(mf("adapter filter"))?;
+    }
 
     let output_type = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_HEVC };
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
@@ -414,16 +424,45 @@ unsafe fn find_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform, E
     )
     .map_err(mf("MFTEnum2"))?;
 
-    let mut found = None;
+    let mut found = Vec::new();
     if !activates.is_null() {
         for i in 0..count as usize {
-            // Taking each entry releases it when it goes out of scope.
-            let activate = (*activates.add(i)).take();
-            if found.is_none() {
-                found = activate.and_then(|a| a.ActivateObject::<IMFTransform>().ok());
+            if let Some(activate) = (*activates.add(i)).take() {
+                found.push(activate);
             }
         }
         CoTaskMemFree(Some(activates as *const _));
     }
-    found.ok_or(EncodeError::NoHardwareEncoder)
+    Ok(found)
+}
+
+/// Finds the hardware HEVC encoder that belongs to `device`'s adapter. On a
+/// machine with two GPUs each vendor registers its own encoder, and an encoder
+/// only works with textures from its own adapter.
+unsafe fn find_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform, EncodeError> {
+    let dxgi: IDXGIDevice = device.cast().map_err(mf("IDXGIDevice"))?;
+    let desc = dxgi.GetAdapter().and_then(|a| a.GetDesc()).map_err(mf("adapter"))?;
+    let adapter = wide(&desc.Description);
+    let mut luid = [0u8; 8];
+    luid[..4].copy_from_slice(&desc.AdapterLuid.LowPart.to_le_bytes());
+    luid[4..].copy_from_slice(&desc.AdapterLuid.HighPart.to_le_bytes());
+
+    let mut tried = Vec::new();
+    for activate in enumerate_encoders(Some(&luid))? {
+        let name = friendly_name(&activate);
+        match activate.ActivateObject::<IMFTransform>() {
+            Ok(transform) => {
+                println!("Encoder: {name} ({adapter})");
+                return Ok(transform);
+            }
+            Err(e) => tried.push(format!("{name}: {e}")),
+        }
+    }
+
+    let all: Vec<String> = enumerate_encoders(None)?.iter().map(|a| friendly_name(a)).collect();
+    Err(EncodeError::NoHardwareEncoder(format!(
+        "capture GPU '{adapter}'; encoders for it: {}; all hardware HEVC encoders on this PC: {}",
+        if tried.is_empty() { "none".to_string() } else { tried.join("; ") },
+        if all.is_empty() { "none".to_string() } else { all.join(", ") },
+    )))
 }
