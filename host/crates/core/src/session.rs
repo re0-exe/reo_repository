@@ -62,6 +62,8 @@ pub enum SessionError {
     VersionMismatch,
     /// Toggling the virtual display failed, typically for lack of elevation.
     Display(String),
+    /// The driver started but its monitor did not show up in Windows.
+    DisplayNotFound(String),
     Other(String),
 }
 
@@ -201,6 +203,9 @@ mod win {
         let display = match VirtualDisplay::enable(&display_mode(&hello)) {
             Ok(d) => d,
             Err(DisplayError::DriverMissing) => return SessionEnd::Fatal(SessionError::DriverMissing),
+            Err(e @ DisplayError::OutputNotFound(_)) => {
+                return SessionEnd::Fatal(SessionError::DisplayNotFound(e.to_string()))
+            }
             Err(e) => return SessionEnd::Fatal(SessionError::Display(e.to_string())),
         };
 

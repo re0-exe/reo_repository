@@ -101,6 +101,9 @@ fn main() {
                         "Tablet uygulaması ile host sürümü uyuşmuyor. İkisini de aynı derlemeden kurun.".to_string(),
                     SessionError::Display(m) =>
                         format!("Sanal ekran açılamadı: {m}\nProgramı \"Run as administrator\" ile çalıştırın."),
+                    SessionError::DisplayNotFound(m) => format!(
+                        "Sanal monitör Windows'ta bulunamadı. Aşağıdaki raporu geliştiriciye iletin:\n{m}"
+                    ),
                     SessionError::Other(m) => format!("Hata: {m}"),
                 });
                 std::process::exit(1);

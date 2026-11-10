@@ -17,8 +17,9 @@ pub enum DisplayError {
     DriverMissing,
     /// Writing the settings or toggling the device failed (usually: not elevated).
     EnableFailed(String),
-    /// The driver is enabled but Windows exposes no output for it.
-    OutputNotFound,
+    /// The driver is enabled but Windows exposes no output for it. Carries a
+    /// report of what Windows does expose.
+    OutputNotFound(String),
 }
 
 impl std::fmt::Display for DisplayError {
@@ -26,7 +27,7 @@ impl std::fmt::Display for DisplayError {
         match self {
             DisplayError::DriverMissing => write!(f, "virtual display driver is not installed"),
             DisplayError::EnableFailed(m) => write!(f, "could not enable the virtual display: {m}"),
-            DisplayError::OutputNotFound => write!(f, "virtual display output not found"),
+            DisplayError::OutputNotFound(report) => write!(f, "virtual display output not found{report}"),
         }
     }
 }
@@ -105,6 +106,32 @@ pub fn find_driver_instance(pnputil_output: &str) -> Option<String> {
     })
 }
 
+/// One GDI display device (`\\\\.\\DISPLAYn`) with the ids of the monitors on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayDevice {
+    pub name: String,
+    pub description: String,
+    pub device_id: String,
+    pub monitor_ids: Vec<String>,
+    /// Part of the Windows desktop.
+    pub attached: bool,
+}
+
+/// Display devices that belong to the virtual display driver. A device
+/// qualifies by its own name or id, by the id of a monitor on it, or by not
+/// having existed in `before`, a snapshot taken while the driver was disabled.
+/// The last rule makes detection independent of how the driver names itself;
+/// an empty snapshot disables it.
+pub fn virtual_candidates<'a>(before: &[String], now: &'a [DisplayDevice]) -> Vec<&'a DisplayDevice> {
+    now.iter()
+        .filter(|d| {
+            is_virtual_display(&d.description, &d.device_id)
+                || d.monitor_ids.iter().any(|m| is_virtual_display("", m) || m.to_ascii_uppercase().contains("MTT1337"))
+                || (!before.is_empty() && !before.contains(&d.name))
+        })
+        .collect()
+}
+
 #[cfg(windows)]
 pub use win::VirtualDisplay;
 
@@ -114,17 +141,23 @@ mod win {
     use std::process::Command;
     use std::time::{Duration, Instant};
     use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Devices::Display::{SetDisplayConfig, SDC_APPLY, SDC_TOPOLOGY_EXTEND};
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1};
     use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP};
 
     /// How long Windows is given to bring the monitor up after the driver is
     /// (re)started.
-    const OUTPUT_WAIT: Duration = Duration::from_secs(10);
+    const OUTPUT_WAIT: Duration = Duration::from_secs(20);
+    /// How long to wait for the monitor to join the desktop on its own before
+    /// asking Windows to extend onto it.
+    const EXTEND_AFTER: Duration = Duration::from_secs(3);
 
     /// The enabled virtual monitor. Dropping it disables the driver's device,
     /// which removes the monitor from Windows.
     pub struct VirtualDisplay {
         instance_id: String,
+        /// Display device names that existed while the driver was disabled.
+        before: Vec<String>,
     }
 
     fn wide_to_string(w: &[u16]) -> String {
@@ -163,45 +196,75 @@ mod win {
         names
     }
 
-    /// `\\.\DISPLAYn` names of the driver's displays that are part of the desktop.
-    fn virtual_device_names() -> Vec<String> {
-        let mut found = Vec::new();
-        let mut i = 0;
-        loop {
-            let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-            if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool() {
-                break;
-            }
-            i += 1;
-            let attached = dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0;
-            if attached && is_virtual_display(&wide_to_string(&dd.DeviceString), &wide_to_string(&dd.DeviceID)) {
-                found.push(wide_to_string(&dd.DeviceName));
-            }
-        }
-        found
+    fn enum_device(parent: Option<&str>, index: u32) -> Option<DISPLAY_DEVICEW> {
+        let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        let wide: Option<Vec<u16>> = parent.map(|p| p.encode_utf16().chain(std::iter::once(0)).collect());
+        let name = wide.as_ref().map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));
+        unsafe { EnumDisplayDevicesW(name, index, &mut dd, 0) }.as_bool().then_some(dd)
     }
 
-    fn find_output() -> Option<IDXGIOutput1> {
-        let names = virtual_device_names();
-        if names.is_empty() {
-            return None;
+    fn display_devices() -> Vec<DisplayDevice> {
+        let mut devices = Vec::new();
+        let mut i = 0;
+        while let Some(dd) = enum_device(None, i) {
+            i += 1;
+            let name = wide_to_string(&dd.DeviceName);
+            let mut monitor_ids = Vec::new();
+            let mut m = 0;
+            while let Some(monitor) = enum_device(Some(&name), m) {
+                m += 1;
+                monitor_ids.push(wide_to_string(&monitor.DeviceID));
+            }
+            devices.push(DisplayDevice {
+                name,
+                description: wide_to_string(&dd.DeviceString),
+                device_id: wide_to_string(&dd.DeviceID),
+                monitor_ids,
+                attached: dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != 0,
+            });
         }
+        devices
+    }
+
+    fn dxgi_outputs() -> Vec<(String, String, IDXGIOutput1)> {
+        let mut outputs = Vec::new();
         unsafe {
-            let factory = CreateDXGIFactory1::<IDXGIFactory1>().ok()?;
+            let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return outputs };
             let mut a = 0;
             while let Ok(adapter) = factory.EnumAdapters1(a) {
                 a += 1;
+                let adapter_name = adapter.GetDesc1().map(|d| wide_to_string(&d.Description)).unwrap_or_default();
                 let mut o = 0;
                 while let Ok(output) = adapter.EnumOutputs(o) {
                     o += 1;
-                    let Ok(desc) = output.GetDesc() else { continue };
-                    if names.contains(&wide_to_string(&desc.DeviceName)) {
-                        return output.cast::<IDXGIOutput1>().ok();
-                    }
+                    let (Ok(desc), Ok(output1)) = (output.GetDesc(), output.cast::<IDXGIOutput1>()) else { continue };
+                    outputs.push((adapter_name.clone(), wide_to_string(&desc.DeviceName), output1));
                 }
             }
         }
-        None
+        outputs
+    }
+
+    /// What Windows currently reports, for the error message when the
+    /// virtual monitor cannot be found.
+    fn diagnostics(before: &[String]) -> String {
+        let mut text = String::from("\n  Display devices:");
+        for d in display_devices() {
+            text.push_str(&format!(
+                "\n    {} | {} | {} | attached={} | new={} | monitors={:?}",
+                d.name,
+                d.description,
+                d.device_id,
+                d.attached,
+                !before.contains(&d.name),
+                d.monitor_ids
+            ));
+        }
+        text.push_str("\n  DXGI outputs:");
+        for (adapter, name, _) in dxgi_outputs() {
+            text.push_str(&format!("\n    {name} on {adapter}"));
+        }
+        text
     }
 
     impl VirtualDisplay {
@@ -225,34 +288,64 @@ mod win {
 
             let adapters = adapter_names();
             let patched = patch_driver_config(&existing, mode, preferred_gpu(&adapters));
-            let changed = patched != existing;
-            if changed {
+            if patched != existing {
                 std::fs::write(DRIVER_CONFIG_PATH, &patched)
                     .map_err(|e| DisplayError::EnableFailed(format!("{DRIVER_CONFIG_PATH}: {e}")))?;
             }
 
-            // Enabling an already enabled device is a no-op; the restart is
-            // what makes the driver re-read its settings.
+            // Start from a disabled device: the driver reads its settings when
+            // it starts, and the snapshot taken here is what later tells the
+            // virtual monitor apart from the real ones.
+            pnputil(&["/disable-device", &instance_id])?;
+            let before: Vec<String> = display_devices().into_iter().map(|d| d.name).collect();
             pnputil(&["/enable-device", &instance_id])?;
-            if changed {
-                pnputil(&["/restart-device", &instance_id])?;
-            }
 
-            let display = VirtualDisplay { instance_id };
-            let deadline = Instant::now() + OUTPUT_WAIT;
-            while find_output().is_none() {
-                if Instant::now() >= deadline {
-                    return Err(DisplayError::OutputNotFound);
+            let display = VirtualDisplay { instance_id, before };
+            let started = Instant::now();
+            let mut extended = false;
+            loop {
+                if display.find_output().is_some() {
+                    return Ok(display);
+                }
+                // The monitor exists but Windows did not add it to the desktop
+                // (for example when projection is set to "PC screen only").
+                if !extended && started.elapsed() >= EXTEND_AFTER && display.detached_candidate() {
+                    extended = true;
+                    unsafe {
+                        let _ = SetDisplayConfig(None, None, SDC_TOPOLOGY_EXTEND | SDC_APPLY);
+                    }
+                }
+                if started.elapsed() >= OUTPUT_WAIT {
+                    let report = diagnostics(&display.before);
+                    return Err(DisplayError::OutputNotFound(report));
                 }
                 std::thread::sleep(Duration::from_millis(250));
             }
-            Ok(display)
+        }
+
+        fn detached_candidate(&self) -> bool {
+            let devices = display_devices();
+            let candidates = virtual_candidates(&self.before, &devices);
+            !candidates.is_empty() && candidates.iter().all(|d| !d.attached)
+        }
+
+        fn find_output(&self) -> Option<IDXGIOutput1> {
+            let devices = display_devices();
+            let names: Vec<&str> = virtual_candidates(&self.before, &devices)
+                .into_iter()
+                .filter(|d| d.attached)
+                .map(|d| d.name.as_str())
+                .collect();
+            if names.is_empty() {
+                return None;
+            }
+            dxgi_outputs().into_iter().find(|(_, name, _)| names.contains(&name.as_str())).map(|(_, _, o)| o)
         }
 
         /// The DXGI output of the virtual monitor. Looked up on every call
         /// because a mode change invalidates earlier handles.
         pub fn output(&self) -> Result<IDXGIOutput1, DisplayError> {
-            find_output().ok_or(DisplayError::OutputNotFound)
+            self.find_output().ok_or_else(|| DisplayError::OutputNotFound(String::new()))
         }
     }
 
@@ -369,6 +462,44 @@ mod tests {
     fn no_driver_instance_when_absent() {
         let out = "Instance ID:                PCI\\VEN_10DE\\4&1\r\nDevice Description:         NVIDIA GeForce RTX 3050 Laptop GPU\r\n";
         assert_eq!(find_driver_instance(out), None);
+    }
+
+    fn device(name: &str, description: &str, monitor: &str, attached: bool) -> DisplayDevice {
+        DisplayDevice {
+            name: name.into(),
+            description: description.into(),
+            device_id: String::new(),
+            monitor_ids: vec![monitor.into()],
+            attached,
+        }
+    }
+
+    #[test]
+    fn candidate_by_adapter_description() {
+        let now = [device("D1", "AMD Radeon(TM) Graphics", "MONITOR\\NCP004D", true), device("D5", "Virtual Display Driver", "", true)];
+        let names: Vec<&str> = virtual_candidates(&[], &now).iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["D5"]);
+    }
+
+    #[test]
+    fn candidate_by_monitor_id() {
+        let now = [device("D1", "AMD Radeon(TM) Graphics", "MONITOR\\NCP004D\\x", true), device("D7", "Some Adapter", "MONITOR\\MTT1337\\{guid}", true)];
+        let names: Vec<&str> = virtual_candidates(&[], &now).iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["D7"]);
+    }
+
+    #[test]
+    fn candidate_by_being_new_since_snapshot() {
+        let before = ["D1".to_string(), "D2".to_string()];
+        let now = [device("D1", "AMD", "", true), device("D2", "AMD", "", false), device("D9", "Unknown Adapter", "", true)];
+        let names: Vec<&str> = virtual_candidates(&before, &now).iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["D9"]);
+    }
+
+    #[test]
+    fn empty_snapshot_does_not_make_everything_a_candidate() {
+        let now = [device("D1", "AMD", "", true)];
+        assert!(virtual_candidates(&[], &now).is_empty());
     }
 
     #[test]
