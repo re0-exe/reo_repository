@@ -90,7 +90,7 @@ mod win {
     use crate::adb::Adb;
     use crate::capture::{CaptureEvent, CapturedFrame, DesktopDuplicator};
     use crate::display::{DisplayError, VirtualDisplay};
-    use crate::encode::{EncodeError, EncodedFrame, EncoderConfig, MfHevcEncoder, VideoEncoder};
+    use crate::encode::{create_encoder, EncodeError, EncodedFrame, EncoderConfig, VideoEncoder};
     use crate::gate::SendGate;
     use crate::transport::{AdbTransport, Transport};
     use protocol::{read_message, write_message, Channel, Message, ProtocolError, ReadError, PORT};
@@ -333,7 +333,7 @@ mod win {
         let mut encode_sum_us = 0u64;
         let mut encode_count = 0u64;
         let mut rebuilds_without_frame = 0u32;
-        let mut encoder: Option<MfHevcEncoder> = None;
+        let mut encoder: Option<Box<dyn VideoEncoder>> = None;
         let mut sent_parameter_sets: Vec<u8> = Vec::new();
         // A frame that was skipped or is still inside the encoder must reach
         // the tablet even if the screen then stops changing.
@@ -441,7 +441,7 @@ mod win {
                         fps: config.fps,
                         bitrate_kbps: default_bitrate_kbps(frame.width, frame.height, config.fps),
                     };
-                    encoder = match MfHevcEncoder::new(duplicator.device(), &cfg) {
+                    encoder = match create_encoder(duplicator.device(), &cfg) {
                         Ok(e) => Some(e),
                         Err(EncodeError::NoHardwareEncoder { gpu, detail }) => {
                             return SessionEnd::Fatal(SessionError::NoHardwareEncoder { gpu, detail })

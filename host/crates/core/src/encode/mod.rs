@@ -4,7 +4,46 @@
 #[cfg(windows)]
 mod mf_hevc;
 #[cfg(windows)]
+mod nvenc;
+#[cfg(windows)]
 pub use mf_hevc::MfHevcEncoder;
+#[cfg(windows)]
+pub use nvenc::NvencEncoder;
+
+/// PCI vendor id of NVIDIA adapters.
+#[cfg(windows)]
+const VENDOR_NVIDIA: u32 = 0x10DE;
+
+/// Starts the best encoder for the GPU that `device` belongs to: NVENC used
+/// directly on NVIDIA hardware, otherwise the vendor's Media Foundation
+/// encoder.
+#[cfg(windows)]
+pub fn create_encoder(
+    device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    cfg: &EncoderConfig,
+) -> Result<Box<dyn VideoEncoder>, EncodeError> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+
+    let vendor = unsafe {
+        device
+            .cast::<IDXGIDevice>()
+            .and_then(|d| d.GetAdapter())
+            .and_then(|a| a.GetDesc())
+            .map(|desc| desc.VendorId)
+            .unwrap_or(0)
+    };
+    if vendor == VENDOR_NVIDIA {
+        match NvencEncoder::new(device, cfg) {
+            Ok(encoder) => {
+                println!("Encoder: NVENC (doğrudan)");
+                return Ok(Box::new(encoder));
+            }
+            Err(e) => println!("NVENC doğrudan başlatılamadı ({e}); Windows encoder'ı deneniyor."),
+        }
+    }
+    Ok(Box::new(MfHevcEncoder::new(device, cfg)?))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderConfig {
@@ -47,6 +86,8 @@ impl std::error::Error for EncodeError {}
 pub trait VideoEncoder {
     /// VPS+SPS+PPS in Annex-B; empty until the encoder has produced them.
     fn parameter_sets(&self) -> Vec<u8>;
+    /// Whether this encoder was configured for frames of this size.
+    fn matches(&self, width: u32, height: u32) -> bool;
     /// Submits a frame. Returns an encoded frame when one is ready, which
     /// with a low-latency encoder is normally the frame just submitted.
     fn encode(&mut self, frame: &crate::capture::CapturedFrame) -> Result<Option<EncodedFrame>, EncodeError>;

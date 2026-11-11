@@ -26,3 +26,8 @@ features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
 ]
+
+# Raw NVENC bindings (types only; the driver library is loaded at run time).
+[target.'cfg(windows)'.dependencies]
+moq-nvenc = "0.1.2"
+libloading = "0.9"

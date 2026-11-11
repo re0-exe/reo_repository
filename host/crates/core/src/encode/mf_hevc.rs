@@ -198,11 +198,6 @@ impl MfHevcEncoder {
         }
     }
 
-    /// Whether this encoder was configured for frames of this size.
-    pub fn matches(&self, width: u32, height: u32) -> bool {
-        self.cfg.width == width && self.cfg.height == height
-    }
-
     /// Converts the BGRA desktop texture into the next NV12 ring texture.
     unsafe fn convert(&mut self, frame: &CapturedFrame) -> Result<ID3D11Texture2D, EncodeError> {
         let input_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
@@ -310,6 +305,10 @@ impl MfHevcEncoder {
 impl VideoEncoder for MfHevcEncoder {
     fn parameter_sets(&self) -> Vec<u8> {
         self.parameter_sets.clone()
+    }
+
+    fn matches(&self, width: u32, height: u32) -> bool {
+        self.cfg.width == width && self.cfg.height == height
     }
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<Option<EncodedFrame>, EncodeError> {
