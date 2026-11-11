@@ -9,7 +9,7 @@ bağlı ikinci monitör olarak kullanmak için.
 | Android client | `android/` | Kotlin, Jetpack Compose, MediaCodec |
 | Wire format | `host/crates/protocol`, `protocol-vectors/` | İki tarafta aynı test vektörleri |
 
-**Durum:** Aşama 1 (video hattı) yazıldı; gerçek cihazda henüz denenmedi.
+**Durum:** beklemede. Ayrıntı: [`docs/status.md`](docs/status.md)
 
 - Tasarım: [`docs/superpowers/specs/2026-11-09-usb-second-display-design.md`](docs/superpowers/specs/2026-11-09-usb-second-display-design.md)
 - Kurulum ve test: [`docs/device-test-phase1.md`](docs/device-test-phase1.md)
