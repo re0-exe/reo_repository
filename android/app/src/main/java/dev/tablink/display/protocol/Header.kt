@@ -28,6 +28,7 @@ internal object MsgType {
     const val PING = 0x05
     const val PONG = 0x06
     const val AUDIO_ROUTE = 0x07
+    const val FRAME_ACK = 0x08
     const val VIDEO_CONFIG = 0x10
     const val VIDEO_FRAME = 0x11
     const val AUDIO_FRAME = 0x20

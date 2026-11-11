@@ -218,6 +218,10 @@ mod win {
 
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe_wanted = Arc::new(AtomicBool::new(false));
+        // Latency of acknowledged frames since the last stats line, in µs.
+        let ack_sum_us = Arc::new(AtomicU64::new(0));
+        let ack_count = Arc::new(AtomicU64::new(0));
+        let ack_max_us = Arc::new(AtomicU64::new(0));
         let ping_sent_us = Arc::new(AtomicU64::new(0));
         let rtt_us = Arc::new(AtomicU64::new(0));
         let gate = Arc::new(SendGate::new(MAX_IN_FLIGHT));
@@ -226,6 +230,7 @@ mod win {
         {
             let (stop, keyframe_wanted, ping_sent_us, rtt_us) =
                 (stop.clone(), keyframe_wanted.clone(), ping_sent_us.clone(), rtt_us.clone());
+            let (ack_sum_us, ack_count, ack_max_us) = (ack_sum_us.clone(), ack_count.clone(), ack_max_us.clone());
             let mut control = control;
             std::thread::spawn(move || {
                 loop {
@@ -234,6 +239,14 @@ mod win {
                         Ok((_, Message::Pong)) => {
                             let sent = ping_sent_us.load(Ordering::Relaxed);
                             rtt_us.store(crate::capture::now_us().saturating_sub(sent), Ordering::Relaxed);
+                        }
+                        Ok((pts, Message::FrameAck)) => {
+                            // Capture time to "decoded on the tablet", plus the
+                            // trip back over USB (about half the ping).
+                            let latency = crate::capture::now_us().saturating_sub(pts);
+                            ack_sum_us.fetch_add(latency, Ordering::Relaxed);
+                            ack_count.fetch_add(1, Ordering::Relaxed);
+                            ack_max_us.fetch_max(latency, Ordering::Relaxed);
                         }
                         Ok(_) => {}
                         Err(_) => break,
@@ -268,8 +281,15 @@ mod win {
             Ok(d) => d,
             Err(e) => return SessionEnd::Fatal(SessionError::Other(e)),
         };
-        let mut captured = display.describe();
+        let describe = |d: &DesktopDuplicator| {
+            let (w, h, hz) = d.mode();
+            format!("{} - {w}x{h} @ {hz:.0} Hz", display.describe())
+        };
+        let mut captured = describe(&duplicator);
         println!("Yakalama: {captured}");
+        // Capture-to-encoded time since the last stats line, in µs.
+        let mut encode_sum_us = 0u64;
+        let mut encode_count = 0u64;
         let mut rebuilds_without_frame = 0u32;
         let mut encoder: Option<MfHevcEncoder> = None;
         let mut sent_parameter_sets: Vec<u8> = Vec::new();
@@ -297,12 +317,19 @@ mod win {
             }
             if last_stats.elapsed() >= STATS_INTERVAL {
                 let secs = last_stats.elapsed().as_secs_f64();
+                let avg_ms = |sum: u64, n: u64| if n == 0 { 0.0 } else { sum as f64 / n as f64 / 1000.0 };
+                let acks = ack_count.swap(0, Ordering::Relaxed);
                 println!(
-                    "{:.0} fps | USB ping {:.1} ms | atlanan frame {}",
+                    "{:.0} fps | encode {:.1} ms | tablete kadar {:.1} ms (en yüksek {:.1}) | USB ping {:.1} ms | atlanan {}",
                     frames as f64 / secs,
+                    avg_ms(encode_sum_us, encode_count),
+                    avg_ms(ack_sum_us.swap(0, Ordering::Relaxed), acks),
+                    ack_max_us.swap(0, Ordering::Relaxed) as f64 / 1000.0,
                     rtt_us.load(Ordering::Relaxed) as f64 / 1000.0,
                     gate.dropped()
                 );
+                encode_sum_us = 0;
+                encode_count = 0;
                 frames = 0;
                 last_stats = Instant::now();
             }
@@ -346,7 +373,7 @@ mod win {
                         Err(_) if stop.load(Ordering::Relaxed) => return SessionEnd::Disconnected,
                         Err(e) => return SessionEnd::Interrupted(e),
                     };
-                    let now = display.describe();
+                    let now = describe(&duplicator);
                     if now != captured {
                         println!("Yakalama: {now}");
                         captured = now;
@@ -405,6 +432,8 @@ mod win {
             }
 
             let (Some(out), Some(enc)) = (output, encoder.as_mut()) else { continue };
+            encode_sum_us += crate::capture::now_us().saturating_sub(out.pts_us);
+            encode_count += 1;
             if out.keyframe {
                 let ps = enc.parameter_sets();
                 if !ps.is_empty() && ps != sent_parameter_sets {

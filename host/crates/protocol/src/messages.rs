@@ -31,6 +31,9 @@ pub enum Message {
     RequestKeyframe,
     Ping,
     Pong,
+    /// Sent by the tablet when a frame has left its decoder; the header's
+    /// `pts_us` is that frame's. Lets the host measure latency on its own clock.
+    FrameAck,
     /// VPS+SPS+PPS in Annex-B.
     VideoConfig(Vec<u8>),
     VideoFrame { keyframe: bool, data: Vec<u8> },
@@ -92,6 +95,7 @@ pub fn write_message<W: Write>(w: &mut W, pts_us: u64, m: &Message) -> io::Resul
         Message::RequestKeyframe => (MsgType::RequestKeyframe, &[]),
         Message::Ping => (MsgType::Ping, &[]),
         Message::Pong => (MsgType::Pong, &[]),
+        Message::FrameAck => (MsgType::FrameAck, &[]),
         Message::VideoConfig(d) => (MsgType::VideoConfig, d),
         Message::VideoFrame { keyframe, data } => {
             if *keyframe {
@@ -124,6 +128,7 @@ pub fn read_message<R: Read>(r: &mut R) -> Result<(u64, Message), ReadError> {
             MsgType::RequestKeyframe => Message::RequestKeyframe,
             MsgType::Ping => Message::Ping,
             MsgType::Pong => Message::Pong,
+            MsgType::FrameAck => Message::FrameAck,
             MsgType::VideoConfig => Message::VideoConfig(payload),
             MsgType::VideoFrame => Message::VideoFrame { keyframe: h.flags & FLAG_KEYFRAME != 0, data: payload },
             MsgType::Pointer | MsgType::AudioRoute | MsgType::AudioFrame => continue,
@@ -271,6 +276,7 @@ mod tests {
             ("video_frame_key.bin", 1000, Message::VideoFrame { keyframe: true, data: vec![1, 2, 3] },
              r#"{"type":"VideoFrame","keyframe":true,"data":[1,2,3]}"#),
             ("ping.bin", 0, Message::Ping, r#"{"type":"Ping"}"#),
+            ("frame_ack.bin", 5000, Message::FrameAck, r#"{"type":"FrameAck"}"#),
         ]
     }
     fn vectors_dir() -> PathBuf {

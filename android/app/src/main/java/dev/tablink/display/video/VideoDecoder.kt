@@ -16,7 +16,11 @@ import java.nio.ByteBuffer
  * backlog that had to be dropped) ends in [onNeedKeyframe], and frames are
  * discarded until that keyframe arrives.
  */
-class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
+class VideoDecoder(
+    private val onNeedKeyframe: () -> Unit,
+    /** Called with a frame's timestamp once it has been handed to the display. */
+    private val onFrameRendered: (ptsUs: Long) -> Unit = {},
+) {
     private class Frame(val data: ByteArray, val ptsUs: Long, val keyframe: Boolean)
     private class Setup(val surface: Surface, val width: Int, val height: Int, val fps: Int, val csd: ByteArray)
 
@@ -163,8 +167,10 @@ class VideoDecoder(private val onNeedKeyframe: () -> Unit) {
                     c.releaseOutputBuffer(index, true)
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "render failed", e)
+                    return
                 }
             }
+            onFrameRendered(info.presentationTimeUs)
         }
 
         override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {

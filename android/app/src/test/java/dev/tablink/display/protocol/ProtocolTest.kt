@@ -30,6 +30,7 @@ class ProtocolTest {
         assertEquals(0L to hello, readMessage(ByteArrayInputStream(vector("hello.bin"))))
         assertEquals(0L to config, readMessage(ByteArrayInputStream(vector("config.bin"))))
         assertEquals(0L to Message.Ping, readMessage(ByteArrayInputStream(vector("ping.bin"))))
+        assertEquals(5000L to Message.FrameAck, readMessage(ByteArrayInputStream(vector("frame_ack.bin"))))
 
         val (_, vc) = readMessage(ByteArrayInputStream(vector("video_config.bin")))
         assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x40), (vc as Message.VideoConfig).data)
@@ -46,6 +47,7 @@ class ProtocolTest {
         assertArrayEquals(vector("hello.bin"), encode(0, hello))
         assertArrayEquals(vector("config.bin"), encode(0, config))
         assertArrayEquals(vector("ping.bin"), encode(0, Message.Ping))
+        assertArrayEquals(vector("frame_ack.bin"), encode(5000, Message.FrameAck))
         assertArrayEquals(vector("video_config.bin"), encode(0, Message.VideoConfig(byteArrayOf(0, 0, 0, 1, 0x40))))
         assertArrayEquals(vector("video_frame_key.bin"), encode(1000, Message.VideoFrame(true, byteArrayOf(1, 2, 3))))
     }

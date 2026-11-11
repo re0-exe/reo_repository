@@ -24,6 +24,9 @@ sealed interface Message {
     data object Ping : Message
     data object Pong : Message
 
+    /** A frame left the decoder; the header's pts is that frame's. */
+    data object FrameAck : Message
+
     /** VPS+SPS+PPS in Annex-B. */
     class VideoConfig(val data: ByteArray) : Message
     class VideoFrame(val keyframe: Boolean, val data: ByteArray) : Message
@@ -58,6 +61,7 @@ fun writeMessage(out: OutputStream, ptsUs: Long, m: Message) {
         Message.RequestKeyframe -> { type = MsgType.REQUEST_KEYFRAME; payload = EMPTY }
         Message.Ping -> { type = MsgType.PING; payload = EMPTY }
         Message.Pong -> { type = MsgType.PONG; payload = EMPTY }
+        Message.FrameAck -> { type = MsgType.FRAME_ACK; payload = EMPTY }
         is Message.VideoConfig -> { type = MsgType.VIDEO_CONFIG; payload = m.data }
         is Message.VideoFrame -> {
             type = MsgType.VIDEO_FRAME
@@ -99,6 +103,7 @@ fun readMessage(input: InputStream): Pair<Long, Message> {
             MsgType.REQUEST_KEYFRAME -> Message.RequestKeyframe
             MsgType.PING -> Message.Ping
             MsgType.PONG -> Message.Pong
+            MsgType.FRAME_ACK -> Message.FrameAck
             MsgType.VIDEO_CONFIG -> Message.VideoConfig(payload)
             MsgType.VIDEO_FRAME -> Message.VideoFrame(flags and Protocol.FLAG_KEYFRAME != 0, payload)
             else -> continue
@@ -109,7 +114,7 @@ fun readMessage(input: InputStream): Pair<Long, Message> {
 
 private val KNOWN_TYPES = setOf(
     MsgType.HELLO, MsgType.CONFIG, MsgType.POINTER, MsgType.REQUEST_KEYFRAME, MsgType.PING,
-    MsgType.PONG, MsgType.AUDIO_ROUTE, MsgType.VIDEO_CONFIG, MsgType.VIDEO_FRAME, MsgType.AUDIO_FRAME,
+    MsgType.PONG, MsgType.AUDIO_ROUTE, MsgType.FRAME_ACK, MsgType.VIDEO_CONFIG, MsgType.VIDEO_FRAME, MsgType.AUDIO_FRAME,
 )
 
 private fun <T> parse(payload: ByteArray, f: (ByteBuffer) -> T): T = try {

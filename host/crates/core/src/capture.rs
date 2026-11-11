@@ -52,7 +52,7 @@ mod win {
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
     use windows::Win32::Graphics::Dxgi::{
-        IDXGIAdapter, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
+        IDXGIAdapter, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
         DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     };
 
@@ -149,6 +149,14 @@ mod win {
 
         pub fn device(&self) -> &ID3D11Device {
             &self.device
+        }
+
+        /// Resolution and refresh rate Windows runs the captured monitor at.
+        pub fn mode(&self) -> (u32, u32, f64) {
+            let desc: DXGI_OUTDUPL_DESC = unsafe { self.duplication.GetDesc() };
+            let rate = desc.ModeDesc.RefreshRate;
+            let hz = if rate.Denominator == 0 { 0.0 } else { rate.Numerator as f64 / rate.Denominator as f64 };
+            (desc.ModeDesc.Width, desc.ModeDesc.Height, hz)
         }
 
         /// Waits up to `timeout_ms` for the desktop image or the mouse

@@ -45,7 +45,7 @@ import kotlin.concurrent.thread
  */
 class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
     private val server = ChannelServer()
-    private val decoder = VideoDecoder(::requestKeyframe)
+    private val decoder = VideoDecoder(::requestKeyframe, ::acknowledgeFrame)
 
     /** Socket writes must stay off the main thread and be serialized. */
     private val controlWriter = Executors.newSingleThreadExecutor()
@@ -214,11 +214,17 @@ class StreamActivity : ComponentActivity(), SurfaceHolder.Callback {
         send(out, Message.RequestKeyframe)
     }
 
-    private fun send(out: OutputStream, msg: Message) {
+    /** Tells the host a frame was rendered, so it can measure latency. */
+    private fun acknowledgeFrame(ptsUs: Long) {
+        val out = synchronized(lock) { controlOut } ?: return
+        send(out, Message.FrameAck, ptsUs)
+    }
+
+    private fun send(out: OutputStream, msg: Message, ptsUs: Long = 0) {
         if (controlWriter.isShutdown) return
         controlWriter.execute {
             try {
-                writeMessage(out, 0, msg)
+                writeMessage(out, ptsUs, msg)
             } catch (e: IOException) {
                 Log.i(TAG, "control write failed: ${e.message}")
             }
