@@ -57,7 +57,9 @@ pub fn choose_config(hello: &Hello, preferred_fps: u16) -> Config {
 #[derive(Debug)]
 pub enum SessionError {
     DriverMissing,
-    NoHardwareEncoder(String),
+    /// The encoder of the GPU the virtual display rendered on would not
+    /// start. Another GPU may still work.
+    NoHardwareEncoder { gpu: String, detail: String },
     /// The tablet app speaks another protocol version.
     VersionMismatch,
     /// Toggling the virtual display failed, typically for lack of elevation.
@@ -148,16 +150,18 @@ mod win {
         Err(last)
     }
 
-    pub fn run_session(adb: &Adb, serial: &str, preferred_fps: u16) -> SessionEnd {
+    /// `avoid_gpus` names GPUs whose encoder already failed to start; the
+    /// virtual display is placed on another one.
+    pub fn run_session(adb: &Adb, serial: &str, preferred_fps: u16, avoid_gpus: &[String]) -> SessionEnd {
         if adb.forward(serial, PORT).is_err() || adb.start_app(serial).is_err() {
             return SessionEnd::Disconnected;
         }
-        let end = stream(preferred_fps);
+        let end = stream(preferred_fps, avoid_gpus);
         let _ = adb.remove_forward(serial, PORT);
         end
     }
 
-    fn stream(preferred_fps: u16) -> SessionEnd {
+    fn stream(preferred_fps: u16, avoid_gpus: &[String]) -> SessionEnd {
         let transport = AdbTransport { port: PORT };
 
         // A connect through the adb tunnel succeeds even before the app
@@ -203,7 +207,7 @@ mod win {
             Ok(v) => v,
             Err(_) => return SessionEnd::Disconnected,
         };
-        let display = match VirtualDisplay::enable(&display_mode(&hello)) {
+        let display = match VirtualDisplay::enable(&display_mode(&hello), avoid_gpus) {
             Ok(d) => d,
             Err(DisplayError::DriverMissing) => return SessionEnd::Fatal(SessionError::DriverMissing),
             Err(e @ DisplayError::OutputNotFound(_)) => {
@@ -341,8 +345,8 @@ mod win {
                     };
                     encoder = match MfHevcEncoder::new(duplicator.device(), &cfg) {
                         Ok(e) => Some(e),
-                        Err(EncodeError::NoHardwareEncoder(detail)) => {
-                            return SessionEnd::Fatal(SessionError::NoHardwareEncoder(detail))
+                        Err(EncodeError::NoHardwareEncoder { gpu, detail }) => {
+                            return SessionEnd::Fatal(SessionError::NoHardwareEncoder { gpu, detail })
                         }
                         Err(e) => return SessionEnd::Interrupted(e.to_string()),
                     };

@@ -460,9 +460,10 @@ unsafe fn find_hardware_encoder(device: &ID3D11Device) -> Result<IMFTransform, E
     }
 
     let all: Vec<String> = enumerate_encoders(None)?.iter().map(|a| friendly_name(a)).collect();
-    Err(EncodeError::NoHardwareEncoder(format!(
-        "capture GPU '{adapter}'; encoders for it: {}; all hardware HEVC encoders on this PC: {}",
+    let detail = format!(
+        "encoders for it: {}; all hardware HEVC encoders on this PC: {}",
         if tried.is_empty() { "none".to_string() } else { tried.join("; ") },
         if all.is_empty() { "none".to_string() } else { all.join(", ") },
-    )))
+    );
+    Err(EncodeError::NoHardwareEncoder { gpu: adapter, detail })
 }

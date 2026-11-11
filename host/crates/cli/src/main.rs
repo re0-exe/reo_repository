@@ -34,6 +34,8 @@ fn main() {
     let adb = Adb::locate();
     println!("TabLink Host — tablet bekleniyor (çıkmak için Ctrl+C).");
     // Printed once per distinct state so the console is not flooded.
+    // GPUs whose hardware encoder would not start in this run.
+    let mut avoid_gpus: Vec<String> = Vec::new();
     let mut last_notice = String::new();
     let mut notice = |msg: String| {
         if msg != last_notice {
@@ -77,7 +79,7 @@ fn main() {
         };
 
         notice(format!("Tablet bulundu ({serial}), bağlanılıyor..."));
-        match run_session(&adb, &serial, fps) {
+        match run_session(&adb, &serial, fps, &avoid_gpus) {
             SessionEnd::Disconnected => {
                 notice(
                     "Bağlantı kesildi; yeniden deneniyor. (Sürekli tekrarlıyorsa tablette TabLink Display \
@@ -91,12 +93,17 @@ fn main() {
                 std::thread::sleep(Duration::from_secs(1));
             }
             SessionEnd::Shutdown => break,
+            SessionEnd::Fatal(SessionError::NoHardwareEncoder { gpu, detail }) if !avoid_gpus.contains(&gpu) => {
+                println!("'{gpu}' üzerindeki HEVC encoder başlatılamadı; diğer GPU deneniyor.\n  ({detail})");
+                avoid_gpus.push(gpu);
+            }
             SessionEnd::Fatal(e) => {
                 eprintln!("{}", match e {
                     SessionError::DriverMissing =>
                         "Virtual Display Driver kurulu değil. Kurulum adımları: docs/driver.md".to_string(),
-                    SessionError::NoHardwareEncoder(detail) => format!(
-                        "Donanımsal HEVC encoder başlatılamadı. Aşağıdaki satırı geliştiriciye iletin:\n  {detail}"
+                    SessionError::NoHardwareEncoder { gpu, detail } => format!(
+                        "Hiçbir GPU'da donanımsal HEVC encoder başlatılamadı (son denenen: {gpu}). \
+                         Aşağıdaki satırı geliştiriciye iletin:\n  {detail}"
                     ),
                     SessionError::VersionMismatch =>
                         "Tablet uygulaması ile host sürümü uyuşmuyor. İkisini de aynı derlemeden kurun.".to_string(),

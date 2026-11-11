@@ -78,11 +78,14 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-/// The virtual display should render on the discrete GPU so that capture and
-/// hardware encode share one device. Returns `None` to keep the driver's own
-/// choice when no NVIDIA adapter is present.
-pub fn preferred_gpu(adapter_names: &[String]) -> Option<&str> {
-    adapter_names.iter().map(String::as_str).find(|n| n.to_ascii_uppercase().contains("NVIDIA"))
+/// Picks the GPU the virtual display should render on. Capture and hardware
+/// encode happen on that same GPU, so one whose encoder failed to start
+/// (`avoid`) is passed over. The discrete NVIDIA GPU is tried first, then any
+/// other real adapter. `None` leaves the choice to the driver.
+pub fn choose_gpu<'a>(adapter_names: &'a [String], avoid: &[String]) -> Option<&'a str> {
+    let usable = |n: &&str| !avoid.iter().any(|a| a == n) && !n.to_ascii_lowercase().contains("basic render");
+    let names = || adapter_names.iter().map(String::as_str).filter(usable);
+    names().find(|n| n.to_ascii_uppercase().contains("NVIDIA")).or_else(|| names().next())
 }
 
 /// True for the display device the driver creates, by description or id.
@@ -282,12 +285,14 @@ mod win {
 
         /// Points the driver at `mode` and brings its monitor up. Requires an
         /// elevated process: toggling a device is an administrative action.
-        pub fn enable(mode: &DisplayMode) -> Result<VirtualDisplay, DisplayError> {
+        pub fn enable(mode: &DisplayMode, avoid_gpus: &[String]) -> Result<VirtualDisplay, DisplayError> {
             let existing = std::fs::read_to_string(DRIVER_CONFIG_PATH).map_err(|_| DisplayError::DriverMissing)?;
             let instance_id = driver_instance().ok_or(DisplayError::DriverMissing)?;
 
             let adapters = adapter_names();
-            let patched = patch_driver_config(&existing, mode, preferred_gpu(&adapters));
+            // With every GPU ruled out, hand the choice back to the driver.
+            let gpu = choose_gpu(&adapters, avoid_gpus).unwrap_or("default");
+            let patched = patch_driver_config(&existing, mode, Some(gpu));
             if patched != existing {
                 std::fs::write(DRIVER_CONFIG_PATH, &patched)
                     .map_err(|e| DisplayError::EnableFailed(format!("{DRIVER_CONFIG_PATH}: {e}")))?;
@@ -451,11 +456,27 @@ mod tests {
         assert_eq!(patch_driver_config(&once, &mode(), None), once);
     }
 
+    fn adapters() -> Vec<String> {
+        ["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 3050 Laptop GPU", "Microsoft Basic Render Driver"]
+            .map(String::from)
+            .to_vec()
+    }
+
     #[test]
     fn prefers_nvidia_adapter() {
-        let names = ["AMD Radeon(TM) Graphics".to_string(), "NVIDIA GeForce RTX 3050 Laptop GPU".to_string()];
-        assert_eq!(preferred_gpu(&names), Some("NVIDIA GeForce RTX 3050 Laptop GPU"));
-        assert_eq!(preferred_gpu(&names[..1]), None);
+        assert_eq!(choose_gpu(&adapters(), &[]), Some("NVIDIA GeForce RTX 3050 Laptop GPU"));
+    }
+
+    #[test]
+    fn falls_back_to_other_gpu_when_nvidia_is_avoided() {
+        let avoid = ["NVIDIA GeForce RTX 3050 Laptop GPU".to_string()];
+        assert_eq!(choose_gpu(&adapters(), &avoid), Some("AMD Radeon(TM) Graphics"));
+    }
+
+    #[test]
+    fn never_picks_the_software_adapter() {
+        let avoid = ["NVIDIA GeForce RTX 3050 Laptop GPU".to_string(), "AMD Radeon(TM) Graphics".to_string()];
+        assert_eq!(choose_gpu(&adapters(), &avoid), None);
     }
 
     #[test]
