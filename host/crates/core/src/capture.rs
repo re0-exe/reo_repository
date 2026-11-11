@@ -86,7 +86,8 @@ mod win {
     pub enum CaptureEvent {
         Frame(CapturedFrame),
         Timeout,
-        ModeChanged,
+        /// Carries the HRESULT that reported the change, for the log.
+        ModeChanged(i32),
     }
 
     pub struct DesktopDuplicator {
@@ -163,7 +164,7 @@ mod win {
                 if let Err(e) = self.duplication.AcquireNextFrame(timeout_ms, &mut info, &mut resource) {
                     return match classify(e.code().0) {
                         Classified::Timeout => Ok(CaptureEvent::Timeout),
-                        Classified::ModeChanged => Ok(CaptureEvent::ModeChanged),
+                        Classified::ModeChanged => Ok(CaptureEvent::ModeChanged(e.code().0)),
                         Classified::Fatal => Err(err("AcquireNextFrame", e)),
                     };
                 }

@@ -113,6 +113,9 @@ mod win {
     /// A mode change leaves the output unavailable for a short while.
     const REOPEN_ATTEMPTS: u32 = 40;
     const REOPEN_INTERVAL: Duration = Duration::from_millis(250);
+    /// Consecutive capture rebuilds without a single frame in between before
+    /// the whole session is restarted (which also restarts the driver).
+    const MAX_REBUILDS_WITHOUT_FRAME: u32 = 40;
 
     fn handshake(transport: &AdbTransport) -> Result<(TcpStream, Hello), ReadError> {
         let mut control = transport.open(Channel::Control)?;
@@ -139,10 +142,7 @@ mod win {
                 .map_err(|e| e.to_string())
                 .and_then(|o| DesktopDuplicator::new(&o).map_err(|e| e.to_string()));
             match opened {
-                Ok(d) => {
-                    println!("Yakalama: {}", display.describe());
-                    return Ok(d);
-                }
+                Ok(d) => return Ok(d),
                 Err(e) => last = e,
             }
             std::thread::sleep(REOPEN_INTERVAL);
@@ -268,6 +268,9 @@ mod win {
             Ok(d) => d,
             Err(e) => return SessionEnd::Fatal(SessionError::Other(e)),
         };
+        let mut captured = display.describe();
+        println!("Yakalama: {captured}");
+        let mut rebuilds_without_frame = 0u32;
         let mut encoder: Option<MfHevcEncoder> = None;
         let mut sent_parameter_sets: Vec<u8> = Vec::new();
         // A frame that was skipped or is still inside the encoder must reach
@@ -312,10 +315,26 @@ mod win {
             // still: the tablet shows nothing until it gets one.
             let resend = pending || keyframe_wanted.load(Ordering::Relaxed);
             let frame: Option<CapturedFrame> = match event {
-                CaptureEvent::Frame(f) => Some(f),
+                CaptureEvent::Frame(f) => {
+                    rebuilds_without_frame = 0;
+                    Some(f)
+                }
                 CaptureEvent::Timeout if resend => duplicator.last_frame(),
                 CaptureEvent::Timeout => None,
-                CaptureEvent::ModeChanged => {
+                CaptureEvent::ModeChanged(code) => {
+                    rebuilds_without_frame += 1;
+                    if rebuilds_without_frame == 1 {
+                        println!("Ekran modu değişti (0x{:08X}); yakalama yeniden kuruluyor.", code as u32);
+                    }
+                    if rebuilds_without_frame > MAX_REBUILDS_WITHOUT_FRAME {
+                        return SessionEnd::Interrupted(format!(
+                            "yakalama {MAX_REBUILDS_WITHOUT_FRAME} denemede geri gelmedi (0x{:08X})",
+                            code as u32
+                        ));
+                    }
+                    // Windows needs a moment to settle after a mode switch;
+                    // rebuilding in a tight loop only loses the output again.
+                    std::thread::sleep(REOPEN_INTERVAL);
                     // Resolution, orientation or refresh rate changed in
                     // Windows: rebuild capture, and the encoder with it.
                     // While the lock screen or a UAC prompt is up, duplication
@@ -327,6 +346,11 @@ mod win {
                         Err(_) if stop.load(Ordering::Relaxed) => return SessionEnd::Disconnected,
                         Err(e) => return SessionEnd::Interrupted(e),
                     };
+                    let now = display.describe();
+                    if now != captured {
+                        println!("Yakalama: {now}");
+                        captured = now;
+                    }
                     continue;
                 }
             };
