@@ -301,7 +301,9 @@ mod win {
             // Start from a disabled device: the driver reads its settings when
             // it starts, and the snapshot taken here is what later tells the
             // virtual monitor apart from the real ones.
-            pnputil(&["/disable-device", &instance_id])?;
+            // Disabling a device that is already disabled is reported as a
+            // failure by pnputil; only the outcome matters here.
+            let _ = pnputil(&["/disable-device", &instance_id]);
             let before: Vec<String> = display_devices().into_iter().map(|d| d.name).collect();
             pnputil(&["/enable-device", &instance_id])?;
 
