@@ -16,6 +16,18 @@ android {
         versionName = "0.1.0"
     }
 
+    // A fixed debug key kept in the repository: every CI build is signed the
+    // same way, so a new build installs over the previous one. It is the
+    // conventional Android debug key and protects nothing.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
