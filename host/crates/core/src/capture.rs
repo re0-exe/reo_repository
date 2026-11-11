@@ -94,7 +94,6 @@ mod win {
         device: ID3D11Device,
         context: ID3D11DeviceContext,
         duplication: IDXGIOutputDuplication,
-        holding_frame: bool,
         /// Copy of the most recent desktop image. Duplication only reports
         /// changes, so a frame that was skipped under backpressure would
         /// otherwise be lost for as long as the screen stays still.
@@ -103,6 +102,7 @@ mod win {
         pointer_shape: Option<CursorShape>,
         pointer_visible: bool,
         pointer_pos: (i32, i32),
+        draw_pointer_pending: bool,
     }
 
     impl DesktopDuplicator {
@@ -137,12 +137,12 @@ mod win {
                     device,
                     context,
                     duplication,
-                    holding_frame: false,
                     last: None,
                     scratch: None,
                     pointer_shape: None,
                     pointer_visible: false,
                     pointer_pos: (0, 0),
+                    draw_pointer_pending: false,
                 })
             }
         }
@@ -163,10 +163,6 @@ mod win {
         /// pointer to change.
         pub fn next(&mut self, timeout_ms: u32) -> Result<CaptureEvent, CaptureError> {
             unsafe {
-                if self.holding_frame {
-                    let _ = self.duplication.ReleaseFrame();
-                    self.holding_frame = false;
-                }
                 let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
                 if let Err(e) = self.duplication.AcquireNextFrame(timeout_ms, &mut info, &mut resource) {
@@ -176,8 +172,29 @@ mod win {
                         Classified::Fatal => Err(err("AcquireNextFrame", e)),
                     };
                 }
-                self.holding_frame = true;
+                // While a frame is held, Windows cannot update the desktop. The
+                // frame is therefore copied and released right here, never
+                // kept across encoding: a process that stalls while holding
+                // one freezes the whole desktop.
+                let result = self.take_frame(&info, resource);
+                let _ = self.duplication.ReleaseFrame();
+                // Drawing the pointer reads pixels back, which waits for the
+                // GPU; it works on the copy, so it happens after the release.
+                if let (Ok(CaptureEvent::Frame(frame)), true) = (&result, self.draw_pointer_pending) {
+                    // A pointer that cannot be drawn is not worth losing the frame over.
+                    let _ = self.draw_pointer(&frame.texture, frame.width, frame.height);
+                }
+                self.draw_pointer_pending = false;
+                result
+            }
+        }
 
+        unsafe fn take_frame(
+            &mut self,
+            info: &DXGI_OUTDUPL_FRAME_INFO,
+            resource: Option<IDXGIResource>,
+        ) -> Result<CaptureEvent, CaptureError> {
+            {
                 let pointer_moved = info.LastMouseUpdateTime != 0;
                 if pointer_moved {
                     self.pointer_visible = info.PointerPosition.Visible.as_bool();
@@ -216,10 +233,7 @@ mod win {
                 if let Some(copy) = self.last.as_ref().map(|(copy, _, _)| copy.clone()) {
                     let copy = &copy;
                     self.context.CopyResource(copy, &texture);
-                    if desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM {
-                        // A pointer that cannot be drawn is not worth losing the frame over.
-                        let _ = self.draw_pointer(&texture, copy, desc.Width, desc.Height);
-                    }
+                    self.draw_pointer_pending = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
                 }
                 Ok(self.last_frame().map_or(CaptureEvent::Timeout, CaptureEvent::Frame))
             }
@@ -246,16 +260,12 @@ mod win {
             }
         }
 
-        /// Blends the pointer into `target`. The pixels under the pointer are
-        /// read back from `source` through a small staging texture, blended on
-        /// the CPU and written back; the frame itself never leaves the GPU.
-        unsafe fn draw_pointer(
-            &mut self,
-            source: &ID3D11Texture2D,
-            target: &ID3D11Texture2D,
-            width: u32,
-            height: u32,
-        ) -> Result<(), CaptureError> {
+        /// Blends the pointer into `target`, which holds a pointer-free copy
+        /// of the desktop. The pixels under the pointer are read back through
+        /// a small staging texture, blended on the CPU and written back; the
+        /// frame itself never leaves the GPU.
+        unsafe fn draw_pointer(&mut self, target: &ID3D11Texture2D, width: u32, height: u32) -> Result<(), CaptureError> {
+            let source = target;
             if !self.pointer_visible {
                 return Ok(());
             }
@@ -310,15 +320,6 @@ mod win {
         }
     }
 
-    impl Drop for DesktopDuplicator {
-        fn drop(&mut self) {
-            if self.holding_frame {
-                unsafe {
-                    let _ = self.duplication.ReleaseFrame();
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

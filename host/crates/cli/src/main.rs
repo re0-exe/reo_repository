@@ -1,21 +1,6 @@
 //! Phase 1 host: a console program that streams the virtual monitor to the
 //! attached tablet and reconnects whenever the link comes back.
 
-// On laptops with hybrid graphics the NVIDIA and AMD drivers look for these
-// exported symbols to treat the process as one that wants the discrete GPU.
-// Tried because the NVIDIA encoder refuses to start in a process the driver
-// has not associated with that GPU; whether this is the cause is unverified.
-#[cfg(windows)]
-#[no_mangle]
-#[used]
-#[allow(non_upper_case_globals)]
-pub static NvOptimusEnablement: u32 = 1;
-#[cfg(windows)]
-#[no_mangle]
-#[used]
-#[allow(non_upper_case_globals)]
-pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
-
 /// Parses `--fps <n>`; anything else is a usage error.
 fn parse_fps(args: &[String]) -> Result<u16, String> {
     match args {

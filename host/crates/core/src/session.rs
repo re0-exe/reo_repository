@@ -116,6 +116,41 @@ mod win {
     /// Consecutive capture rebuilds without a single frame in between before
     /// the whole session is restarted (which also restarts the driver).
     const MAX_REBUILDS_WITHOUT_FRAME: u32 = 40;
+    /// If the capture loop makes no progress for this long, the process is
+    /// stuck inside a driver call. It then exits rather than risk taking the
+    /// desktop down with it.
+    const WATCHDOG_LIMIT: Duration = Duration::from_secs(5);
+
+    /// Ends the process when `heartbeat_us` stops advancing. Exiting releases
+    /// every display and GPU resource the process holds.
+    fn spawn_watchdog(heartbeat_us: Arc<AtomicU64>, done: Arc<AtomicBool>) {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(500));
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+            let idle_us = crate::capture::now_us().saturating_sub(heartbeat_us.load(Ordering::Relaxed));
+            if idle_us > WATCHDOG_LIMIT.as_micros() as u64 {
+                eprintln!(
+                    "Program {} saniyedir yanıt vermiyor; masaüstünü kilitlememek için kapatılıyor.",
+                    WATCHDOG_LIMIT.as_secs()
+                );
+                // Removing the monitor may itself hang if the system is
+                // stuck, so it gets a moment and then the process exits anyway.
+                std::thread::spawn(VirtualDisplay::disable_leftover);
+                std::thread::sleep(Duration::from_secs(2));
+                std::process::exit(3);
+            }
+        });
+    }
+
+    /// Stops the watchdog when the session ends normally.
+    struct WatchdogGuard(Arc<AtomicBool>);
+    impl Drop for WatchdogGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
 
     fn handshake(transport: &AdbTransport) -> Result<(TcpStream, Hello), ReadError> {
         let mut control = transport.open(Channel::Control)?;
@@ -135,7 +170,9 @@ mod win {
     fn open_duplicator(display: &VirtualDisplay, keep_trying: impl Fn() -> bool) -> Result<DesktopDuplicator, String> {
         let mut last = String::new();
         let mut attempt = 0;
-        while attempt < REOPEN_ATTEMPTS || keep_trying() {
+        // `keep_trying` is consulted on every round; it doubles as the
+        // caller's "still alive" signal.
+        while keep_trying() || attempt < REOPEN_ATTEMPTS {
             attempt += 1;
             let opened = display
                 .output()
@@ -276,7 +313,12 @@ mod win {
             });
         }
 
-        let running = || !stop.load(Ordering::Relaxed) && !crate::shutdown::requested();
+        let heartbeat_us = Arc::new(AtomicU64::new(crate::capture::now_us()));
+        let beat = || heartbeat_us.store(crate::capture::now_us(), Ordering::Relaxed);
+        let running = || {
+            beat();
+            !stop.load(Ordering::Relaxed) && !crate::shutdown::requested()
+        };
         let mut duplicator = match open_duplicator(&display, || false) {
             Ok(d) => d,
             Err(e) => return SessionEnd::Fatal(SessionError::Other(e)),
@@ -300,8 +342,13 @@ mod win {
         let mut last_ping = Instant::now();
         let mut last_stats = Instant::now();
         println!("Yayın başladı.");
+        let watchdog_done = Arc::new(AtomicBool::new(false));
+        let _watchdog = WatchdogGuard(watchdog_done.clone());
+        beat();
+        spawn_watchdog(heartbeat_us.clone(), watchdog_done);
 
         loop {
+            beat();
             if crate::shutdown::requested() {
                 return SessionEnd::Shutdown;
             }

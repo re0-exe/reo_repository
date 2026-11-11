@@ -95,9 +95,6 @@ impl MfHevcEncoder {
             let _ = codec_api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(cfg.bitrate_kbps * 1000));
             let _ = codec_api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
             let _ = codec_api.SetValue(&CODECAPI_AVEncMPVGOPSize, &VARIANT::from(GOP_FRAMES));
-            // 0 = fastest. At these bitrates the quality presets buy little,
-            // while a slow preset caps the frame rate on integrated GPUs.
-            let _ = codec_api.SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &VARIANT::from(0u32));
 
             // The output type must be set before the input type.
             let output = MFCreateMediaType().map_err(mf("output type"))?;
